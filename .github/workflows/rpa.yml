@@ -1,0 +1,166 @@
+name: RPA agent
+
+on:
+  schedule:
+    # Ejecutar cada 5 minutos
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "smoke = verifica la cadena, no toca datos | rpa = carga un caso (fase 2)"
+        type: choice
+        options: [smoke, rpa]
+        default: smoke
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rpa-agent
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Agente RPA (${{ github.event.inputs.mode || 'smoke' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MODE: ${{ github.event.inputs.mode || 'smoke' }}
+      GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      SHEET_TAB: ${{ secrets.SHEET_TAB || 'Casos' }}
+      BASE_URL: ${{ secrets.BASE_URL || 'https://cmas.cmajustadores.com' }}
+      RPA_USER: ${{ secrets.RPA_USER }}
+      RPA_PASS: ${{ secrets.RPA_PASS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Verificar scripts
+        run: |
+          npm run lint
+          npm test
+
+      - name: Instalar Command Code y agent-browser
+        run: |
+          npm i -g command-code@latest agent-browser
+          agent-browser install
+          cmd --version
+          agent-browser --version
+
+      - name: Verificar autenticación del agente
+        env:
+          COMMAND_CODE_API_KEY: ${{ secrets.COMMAND_CODE_API_KEY }}
+        run: |
+          faltan=""
+          for name in COMMAND_CODE_API_KEY GOOGLE_SA_JSON SHEET_ID RPA_USER RPA_PASS; do
+            if [ -z "$(printenv "$name")" ]; then faltan="$faltan $name"; fi
+          done
+          if [ -n "$faltan" ]; then
+            echo "::error::Faltan secrets:$faltan"
+            exit 1
+          fi
+          cmd status
+
+      - name: Preparar directorio de evidencia
+        run: mkdir -p artifacts
+
+      - name: Correr el agente
+        id: agent
+        env:
+          COMMAND_CODE_API_KEY: ${{ secrets.COMMAND_CODE_API_KEY }}
+          RPA_MODEL: ${{ secrets.RPA_MODEL || 'deepseek/deepseek-v4.1-flash' }}
+        run: |
+          set -u
+          PROMPT=prompts/smoke.md
+          if [ "$MODE" = "rpa" ]; then PROMPT=prompts/rpa.md; fi
+
+          MODEL_ARGS=()
+          if [ -n "${RPA_MODEL:-}" ]; then MODEL_ARGS=(--model "$RPA_MODEL"); fi
+
+          set +e
+          cat "$PROMPT" | cmd -p \
+            --output-format json \
+            --yolo --skip-onboarding --trust \
+            --max-turns 150 \
+            "${MODEL_ARGS[@]}" | tee "$RUNNER_TEMP/run.ndjson"
+          rc=${PIPESTATUS[1]}
+          set -e
+
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+          case "$rc" in
+            0)  echo "Run completado." ;;
+            3)  echo "::error::Command Code no está autenticado. Revisá COMMAND_CODE_API_KEY." ;;
+            4)  echo "::error::Una herramienta fue denegada por permisos." ;;
+            5)  echo "::error::Rate limit del proveedor. Reintentar más tarde." ;;
+            6)  echo "::error::Error de red durante el run." ;;
+            7)  echo "::error::Error de servidor del proveedor (5xx)." ;;
+            8)  echo "::error::Se alcanzó el máximo de turnos (--max-turns) sin respuesta final." ;;
+            9)  echo "::error::El modelo no devolvió respuesta." ;;
+            10) echo "::error::Sin créditos en la cuenta de Command Code." ;;
+            *)  echo "::error::El run terminó con código $rc." ;;
+          esac
+          [ "$rc" -eq 0 ] || exit 1
+
+      - name: Publicar resumen
+        if: always()
+        env:
+          NDJSON: ${{ runner.temp }}/run.ndjson
+        run: |
+          cp -f "$NDJSON" artifacts/run.ndjson 2>/dev/null || true
+          node - <<'NODE'
+          const fs = require("fs");
+          const path = process.env.NDJSON;
+          let body = "## Resultado del agente\n\nSin NDJSON del run.\n";
+
+          if (fs.existsSync(path)) {
+            let result = null;
+            for (const line of fs.readFileSync(path, "utf8").trim().split("\n")) {
+              try {
+                const frame = JSON.parse(line);
+                if (frame.type === "result") result = frame;
+              } catch {}
+            }
+
+            if (result) {
+              body = [
+                "## Resultado del agente",
+                "",
+                `- subtipo: \`${result.subtype}\``,
+                `- duración: ${result.durationMs} ms`,
+                `- tokens: \`${JSON.stringify(result.usage ?? {})}\``,
+                "",
+                "```json",
+                result.finalText || "(sin texto)",
+                "```",
+              ].join("\n");
+            } else {
+              body = "## Resultado del agente\n\nEl NDJSON no contiene un frame `result`.\n";
+            }
+          }
+
+          console.log(body);
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, body + "\n");
+          }
+          NODE
+
+      - name: Subir evidencia
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpa-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

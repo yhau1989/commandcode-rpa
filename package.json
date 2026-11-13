@@ -1,0 +1,12 @@
+{
+  "name": "commandcode-rpa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check scripts/sheet.mjs"
+  },
+  "dependencies": {
+    "google-auth-library": "^9.15.0"
+  }
+}

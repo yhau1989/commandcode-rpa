@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(which mmdc mermaid 2>/dev/null; ls /opt/homebrew/bin | grep -i mermaid | head; grep -c '```mermaid' /Users/samuel/Documents/GitHub/samuel/commandcode-rpa/README.md; grep -c '^```$' /Users/samuel/Documents/GitHub/samuel/commandcode-rpa/README.md)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}
