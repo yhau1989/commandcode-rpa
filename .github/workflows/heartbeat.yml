@@ -1,0 +1,19 @@
+name: Heartbeat
+
+# Canario: solo sirve para comprobar que el scheduler de GitHub entrega
+# eventos schedule en este repo. Borrar cuando el diagnóstico termine.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Latido
+        run: echo "schedule OK a las $(date -u +%Y-%m-%dT%H:%M:%SZ)"
